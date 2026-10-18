@@ -25,7 +25,6 @@ createdb libreria_db
 ```
 
 ## 2. Entorno virtual e instalación
-
 ```bash
 # desde la raíz del proyecto
 python3 -m venv .venv
@@ -230,3 +229,29 @@ INFO:     127.0.0.1:48364 - "GET /ventas/1 HTTP/1.1" 200 OK
 | GET | `/ventas/{id}` | 200, 404, 422 |
 
 > **RN-08**: no existe `PATCH`/`PUT` de ventas (son inmutables) → 405.
+
+
+
+### Evidencia Caso C-07: Detalle sin N+1
+
+#### 1. Consultas emitidas en GET /libros/1 (2 consultas fijas):
+- Consulta 1 (Libro + Editorial + Género con joinedload):
+  SELECT libro.id, libro.isbn, libro.titulo, libro.precio, libro.stock, libro.editorial_id, libro.genero_id, editorial_1.id AS id_1, editorial_1.nombre, editorial_1.pais, genero_1.id AS id_2, genero_1.nombre AS nombre_1 
+  FROM libro LEFT OUTER JOIN editorial AS editorial_1 ON editorial_1.id = libro.editorial_id LEFT OUTER JOIN genero AS genero_1 ON genero_1.id = libro.genero_id 
+  WHERE libro.id = $1::INTEGER
+
+- Consulta 2 (Autorías + Autor con selectinload):
+  SELECT libro_autor.libro_id, libro_autor.autor_id, libro_autor.rol, libro_autor.orden, autor_1.id, autor_1.nombre, autor_1.nacionalidad 
+  FROM libro_autor LEFT OUTER JOIN autor AS autor_1 ON autor_1.id = libro_autor.autor_id 
+  WHERE libro_autor.libro_id IN ($1::INTEGER)
+
+#### 2. Consultas emitidas en GET /ventas/1 (2 consultas fijas):
+- Consulta 1 (Venta + Cliente con joinedload):
+  SELECT venta.id, venta.cliente_id, venta.fecha, venta.total, cliente_1.id AS id_1, cliente_1.nombre, cliente_1.email 
+  FROM venta LEFT OUTER JOIN cliente AS cliente_1 ON cliente_1.id = venta.cliente_id 
+  WHERE venta.id = $1::INTEGER
+
+- Consulta 2 (Renglones + Libro con selectinload):
+  SELECT renglon_venta.venta_id, renglon_venta.id, renglon_venta.libro_id, renglon_venta.cantidad, renglon_venta.precio_unitario, libro_1.id, libro_1.isbn, libro_1.titulo, libro_1.precio, libro_1.stock, libro_1.editorial_id, libro_1.genero_id 
+  FROM renglon_venta LEFT OUTER JOIN libro AS libro_1 ON libro_1.id = renglon_venta.libro_id 
+  WHERE renglon_venta.venta_id IN ($1::INTEGER)
