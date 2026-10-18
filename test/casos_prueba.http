@@ -1,0 +1,265 @@
+##############################################################################
+# Casos de prueba obligatorios — TP Programación III (librería)
+#
+# Uso: VS Code con la extensión "REST Client" (octref.rest-client), o
+# JetBrains HTTP Client. Requiere el servidor levantado:
+#
+#     uvicorn app.main:app --reload
+#
+# Base de datos en estado inicial conocido: `python -m app.seed`
+# (ids fijos: editorial 1 = Emecé, género 1 = Novela, autor 1 = Cortázar,
+#  libro 1 = Rayuela, libro 3 = Ficciones, cliente 1 = Tomás Ríos, venta 1).
+#
+# Cada caso documenta el resultado ESPERADO.
+##############################################################################
+
+@base = http://localhost:8000
+
+### C-01: Parámetro de ruta que NO es entero -> 422 (validación de FastAPI)
+# Esperado: 422 Unprocessable Entity con detalle de validación del path
+# `libro_id: Input should be a valid integer`.
+# No llega a tocar la base de datos.
+GET {{base}}/libros/abc
+
+### C-01 (variante): id no entero en otro módulo -> 422
+# Esperado: 422
+GET {{base}}/ventas/xyz
+
+### C-02: ISBN repetido -> 409 con mensaje propio (RN-01, RN-12)
+# Esperado: 409 Conflict
+# detail: "Ya existe un libro con ese ISBN" (sin nombres de tablas ni constraints)
+# El INSERT se intenta DIRECTAMENTE (sin consulta previa) y el IntegrityError
+# se traduce en el 409.
+POST {{base}}/libros/
+Content-Type: application/json
+
+{
+  "isbn": "978-84-376-0494-7",
+  "titulo": "Rayuela (duplicado)",
+  "precio": "25000.00",
+  "stock": 1,
+  "editorial_id": 1,
+  "genero_id": 1
+}
+
+### C-02: email repetido -> 409 con mensaje propio (RN-02)
+# Esperado: 409 Conflict, detail: "Ya existe un cliente con ese email"
+POST {{base}}/clientes/
+Content-Type: application/json
+
+{
+  "nombre": "Otro Cliente",
+  "email": "tomas.rios@correo.com"
+}
+
+### C-03: segundo perfil para el mismo cliente -> 409 (RN-09)
+# Preparación: el cliente 1 (Tomás Ríos) no tiene perfil en el seed.
+# Esperado PRIMER POST: 201 Created con el perfil.
+POST {{base}}/clientes/1/perfil
+Content-Type: application/json
+
+{
+  "telefono": "+54 11 5555-0000",
+  "direccion": "Calle Falsa 123"
+}
+
+### C-03 (segunda llamada): -> 409
+# Esperado: 409 Conflict, detail: "El cliente ya tiene un perfil" (1 a 1)
+POST {{base}}/clientes/1/perfil
+Content-Type: application/json
+
+{
+  "telefono": "+54 11 9999-9999",
+  "direccion": "Otra Dirección 456"
+}
+
+### C-04: libro con editorial inexistente -> 409 con mensaje propio
+# Esperado: 409 Conflict, detail: "No se pudo crear el libro: el ISBN debe ser
+# único y la editorial, el género y los autores deben existir"
+# (sin "foreign key", sin nombres de constraint ni de tabla)
+POST {{base}}/libros/
+Content-Type: application/json
+
+{
+  "isbn": "978-0-00-000010-1",
+  "titulo": "Prueba C-04 editorial",
+  "precio": "100.00",
+  "stock": 1,
+  "editorial_id": 9999
+}
+
+### C-04: libro con autor inexistente -> 409 con mensaje propio
+# Esperado: 409 Conflict con el mismo mensaje propio.
+POST {{base}}/libros/
+Content-Type: application/json
+
+{
+  "isbn": "978-0-00-000011-8",
+  "titulo": "Prueba C-04 autor",
+  "precio": "100.00",
+  "stock": 1,
+  "editorial_id": 1,
+  "genero_id": 1,
+  "autores": [
+    { "autor_id": 9999, "rol": "autor", "orden": 1 }
+  ]
+}
+
+### C-05: venta con libro inexistente -> 409
+# Esperado: 409 Conflict, detail propio (ej. "La venta no pudo registrarse:
+# verifique que el cliente y los libros existan")
+POST {{base}}/ventas/
+Content-Type: application/json
+
+{
+  "cliente_id": 1,
+  "renglones": [
+    { "libro_id": 9999, "cantidad": 1 }
+  ]
+}
+
+### C-05: venta con cliente inexistente -> 409
+# Esperado: 409 Conflict con el mismo mensaje propio.
+POST {{base}}/ventas/
+Content-Type: application/json
+
+{
+  "cliente_id": 9999,
+  "renglones": [
+    { "libro_id": 1, "cantidad": 1 }
+  ]
+}
+
+### C-06: venta VÁLIDA con dos renglones -> 201
+# Esperado: 201 Created.
+# - precios copiados del SERVIDOR (RN-04): el body no lleva precios y la
+#   respuesta trae precio_unitario = precio vigente del libro;
+# - total calculado en el SERVIDOR (RN-06): 1 * 27000.00 + 2 * 18500.00
+#   = 64000.00;
+# - en consola aparece el log del comprobante en background (Ejercicio 7).
+POST {{base}}/ventas/
+Content-Type: application/json
+
+{
+  "cliente_id": 1,
+  "renglones": [
+    { "libro_id": 2, "cantidad": 1 },
+    { "libro_id": 3, "cantidad": 2 }
+  ]
+}
+
+### C-07: detalle de un libro -> cantidad FIJA de consultas (sin N+1)
+# Esperado: 200 con libro + editorial + género + autores ya resueltos.
+# En consola (DB_ECHO=True) se ven EXACTAMENTE 2 consultas:
+#   1) SELECT libro ... LEFT JOIN editorial ... LEFT JOIN genero WHERE libro.id = $1
+#   2) SELECT libro_autor ... LEFT JOIN autor WHERE libro_autor.libro_id IN ($1)
+# Ver la sección "Evidencia C-07" del README.md.
+GET {{base}}/libros/1
+
+### C-07: detalle de una venta -> cantidad FIJA de consultas (sin N+1)
+# Esperado: 200 con venta + cliente + renglones(libro) ya resueltos.
+# En consola se ven EXACTAMENTE 2 consultas:
+#   1) SELECT venta ... LEFT JOIN cliente WHERE venta.id = $1
+#   2) SELECT renglon_venta ... LEFT JOIN libro WHERE renglon_venta.venta_id IN ($1)
+GET {{base}}/ventas/1
+
+### C-08: búsqueda por título con intento de SQL injection -> 200 con []
+# Esperado: 200 OK con lista vacía [].
+# El texto va como PARÁMETRO LIGADO dentro de ilike (RN-11): no se concatena
+# SQL, por lo que la inyección se trata como texto literal de búsqueda.
+GET {{base}}/libros/?titulo=' OR '1'='1
+
+### ---------------------------------------------------------------------------
+### Complementos (no forman parte de los 8 obligatorios, sirven para revisar)
+### ---------------------------------------------------------------------------
+
+### Paginación válida (RN-10)
+# Esperado: 200 con máximo 1 elemento.
+GET {{base}}/libros/?limit=1&offset=0
+
+### Paginación inválida -> 422 (limit=0, limit=101, offset=-1)
+# Esperado: 422
+GET {{base}}/libros/?limit=101
+
+### Filtro por título (ilike, insensible a mayúsculas)
+# Esperado: 200 con [ { "titulo": "Rayuela", ... } ]
+GET {{base}}/libros/?titulo=rayuela
+
+### Filtro por género
+# Esperado: 200 solo con libros de Novela (género 1)
+GET {{base}}/libros/?genero_id=1
+
+### Libros de una editorial (404 si no existe)
+# Esperado: 200 con los libros de Emecé (ids 1 y 3)
+GET {{base}}/editoriales/1/libros
+# Esperado: 404 "Editorial no encontrada"
+GET {{base}}/editoriales/9999/libros
+
+### Libros de un género (404 si no existe)
+# Esperado: 200 con los libros de Novela (ids 1 y 2)
+GET {{base}}/generos/1/libros
+
+### Libros de un autor con su rol y orden
+# Esperado: 200 [ { "id": 1, "titulo": "Rayuela", "rol": "autor", "orden": 1 } ]
+GET {{base}}/autores/1/libros
+
+### Cliente con su perfil (1 a 1)
+# Esperado: 200 con "perfil": { ... } o "perfil": null
+GET {{base}}/clientes/1
+
+### Ventas de un cliente (404 si no existe)
+# Esperado: 200 con la venta de ejemplo (total 62000.00)
+GET {{base}}/clientes/1/ventas
+# Esperado: 404 "Cliente no encontrado"
+GET {{base}}/clientes/9999/ventas
+
+### RN-08: NO existe PATCH de ventas (inmutables)
+# Esperado: 405 Method Not Allowed
+PATCH {{base}}/ventas/1
+Content-Type: application/json
+
+{
+  "total": "1.00"
+}
+
+### RN-05: venta sin renglones -> 422
+# Esperado: 422
+POST {{base}}/ventas/
+Content-Type: application/json
+
+{
+  "cliente_id": 1,
+  "renglones": []
+}
+
+### RN-05: venta con un libro repetido -> 422
+# Esperado: 422 (un mismo libro no puede aparecer dos veces en la venta)
+POST {{base}}/ventas/
+Content-Type: application/json
+
+{
+  "cliente_id": 1,
+  "renglones": [
+    { "libro_id": 1, "cantidad": 1 },
+    { "libro_id": 1, "cantidad": 2 }
+  ]
+}
+
+### Validaciones de negocio -> 422 (precio > 0, stock >= 0)
+# Esperado: 422
+POST {{base}}/libros/
+Content-Type: application/json
+
+{
+  "isbn": "978-0-00-000012-5",
+  "titulo": "Precio inválido",
+  "precio": "-5.00",
+  "stock": -1,
+  "editorial_id": 1
+}
+
+### Health checks
+# Esperado: 200 {"status": "alive"}
+GET {{base}}/health/live
+# Esperado: 200 {"status": "ready"} si la BD responde "SELECT 1"
+GET {{base}}/health/ready
